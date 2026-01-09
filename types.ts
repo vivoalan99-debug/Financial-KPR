@@ -42,7 +42,7 @@ export interface ExtraPaymentLog {
   principalReduced: number;
   installmentBefore: number;
   installmentAfter: number;
-  termReduction: number; // months saved from original payoff date
+  termReduction: number; 
   totalInterestSaved: number;
 }
 
@@ -54,7 +54,7 @@ export interface MonthLedger {
     salary: number;
     thr: number;
     compensation: number;
-    bpjsClaim: number;
+    bpjsClaim: number; 
     total: number;
   };
   expenses: {
@@ -81,6 +81,10 @@ export interface MonthLedger {
     bpjs: number;
     bufferTarget: number;
     emergencyTarget: number;
+  };
+  metrics: {
+    incomeToExpenseRatio: number; // Income / Expenses %
+    debtServiceRatio: number;     // Installment / Income %
   };
   surplus: number;
   riskFlags: string[];

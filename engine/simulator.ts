@@ -20,10 +20,6 @@ import {
 } from './mortgage';
 import { analyzeRisk } from './risk';
 
-/**
- * Meticulously projects total future interest from a given point in time
- * following the defined interest rate schedule tiers.
- */
 function projectFutureInterest(
   principal: number, 
   remainingMonths: number, 
@@ -81,21 +77,28 @@ export const runSimulation = (inputs: FinancialInputs): SimulationResult => {
     const dateStr = `${MONTH_NAMES[monthInYear]} ${SIM_START_YEAR + yearIndex}`;
 
     const isEmployed = inputs.unemploymentMonth === undefined || m < inputs.unemploymentMonth;
+    
     if (!isEmployed) monthsSinceUnemployment++;
 
     if (isEmployed && isNewYear && yearIndex > 0) {
       currentBaseSalary *= (1 + inputs.annualSalaryIncreasePercent / 100);
     }
 
+    // --- Income Logic ---
     let salaryIncome = isEmployed ? currentBaseSalary : 0;
     if (inputs.unemploymentMonth === m) salaryIncome = currentBaseSalary;
 
     let thrIncome = (isEmployed && monthInYear === THR_MONTH) ? currentBaseSalary : 0;
+
     let compIncome = 0;
-    if (monthInYear === COMP_MONTH) compIncome = currentBaseSalary;
+    if (isEmployed && monthInYear === COMP_MONTH) {
+      compIncome = currentBaseSalary;
+    } else if (!isEmployed && monthsSinceUnemployment === 1) {
+      compIncome = currentBaseSalary; 
+    }
 
     let bpjsClaim = 0;
-    if (!isEmployed && monthsSinceUnemployment === 1) {
+    if (!isEmployed && monthsSinceUnemployment === 2) {
       bpjsClaim = currentBpjsBalance;
       currentBpjsBalance = 0;
     } else if (isEmployed) {
@@ -104,13 +107,13 @@ export const runSimulation = (inputs: FinancialInputs): SimulationResult => {
 
     const totalIncome = salaryIncome + thrIncome + compIncome + bpjsClaim;
 
+    // --- Outflow Logic ---
     let monthlyBaseExpenses = inputs.expenses.reduce((acc, exp) => {
       const annualGrowthFactor = Math.pow(1 + exp.annualIncreasePercent / 100, yearIndex);
       return acc + (exp.monthlyAmount * annualGrowthFactor);
     }, 0);
 
     const holidayExpenses = thrIncome * 0.5;
-    
     const currentRate = getInterestRateForYear(yearIndex);
     
     if (currentRate !== lastInterestRate) {
@@ -132,44 +135,30 @@ export const runSimulation = (inputs: FinancialInputs): SimulationResult => {
         const minExtra = 6 * currentMortgageInstallment;
         if (currentExtraBucket >= minExtra || mortgagePrincipal < minExtra) {
           installmentBeforeRecalc = currentMortgageInstallment;
-          
           const penaltyPercent = inputs.mortgage.extraPaymentPenaltyPercent;
           const totalPaid = Math.min(currentExtraBucket, mortgagePrincipal / (1 - penaltyPercent / 100));
-          const penaltyAmount = totalPaid * (penaltyPercent / 100);
-          const effectiveExtra = totalPaid - penaltyAmount;
+          const effectiveExtra = totalPaid - (totalPaid * penaltyPercent / 100);
 
-          // Meticulous Savings Calculation: Compare projected interest before vs after
           const futureInterestBefore = projectFutureInterest(mortgagePrincipal, mortgageRemainingMonths, yearIndex, monthInYear);
-          
           mortgagePrincipal -= effectiveExtra;
           currentExtraBucket -= totalPaid;
           extraPaymentApplied = effectiveExtra;
-
           currentMortgageInstallment = calculateAnnuityInstallment(mortgagePrincipal, currentRate, mortgageRemainingMonths);
           installmentAfterRecalc = currentMortgageInstallment;
 
-          const futureInterestAfter = projectFutureInterest(mortgagePrincipal, mortgageRemainingMonths, yearIndex, monthInYear);
-          const savings = futureInterestBefore - futureInterestAfter;
+          const savings = futureInterestBefore - projectFutureInterest(mortgagePrincipal, mortgageRemainingMonths, yearIndex, monthInYear);
           totalInterestSaved += savings;
-
           extraPaymentLogs.push({
-            monthIndex: m,
-            year: SIM_START_YEAR + yearIndex,
-            date: dateStr,
-            amountPaid: totalPaid,
-            penaltyAmount: penaltyAmount,
-            principalReduced: effectiveExtra,
-            installmentBefore: installmentBeforeRecalc,
-            installmentAfter: installmentAfterRecalc,
-            termReduction: 0, 
-            totalInterestSaved: savings
+            monthIndex: m, year: SIM_START_YEAR + yearIndex, date: dateStr, amountPaid: totalPaid,
+            penaltyAmount: totalPaid * penaltyPercent / 100, principalReduced: effectiveExtra,
+            installmentBefore: installmentBeforeRecalc, installmentAfter: installmentAfterRecalc,
+            termReduction: 0, totalInterestSaved: savings
           });
         }
       }
 
       mortgagePrincipal -= principalPaid;
       mortgageRemainingMonths--;
-
       if (mortgagePrincipal <= 0) {
         mortgagePrincipal = 0;
         if (fullPayoffMonth === null) fullPayoffMonth = m;
@@ -177,32 +166,35 @@ export const runSimulation = (inputs: FinancialInputs): SimulationResult => {
     }
 
     const totalExpenses = monthlyBaseExpenses + (mortgagePrincipal > 0 ? currentMortgageInstallment : 0) + holidayExpenses;
+    const surplusForMonth = totalIncome - totalExpenses;
 
+    // --- Metrics & Flags Logic ---
+    const incomeToExpenseRatio = totalExpenses > 0 ? (totalIncome / totalExpenses) * 100 : 1000;
+    const debtServiceRatio = totalIncome > 0 ? ((mortgagePrincipal > 0 ? currentMortgageInstallment : 0) / totalIncome) * 100 : 0;
+
+    const riskFlags: string[] = [];
+    if (surplusForMonth < 0) riskFlags.push('DEFICIT');
+    if (debtServiceRatio > 35) riskFlags.push('DTI_HIGH');
+    if (debtServiceRatio > 50) riskFlags.push('DTI_CRITICAL');
+    if (!isEmployed && currentBufferBalance < 1000000) riskFlags.push('RUNWAY_LOW');
+    if (mortgagePrincipal === 0) riskFlags.push('PAID_OFF');
+
+    // --- Surplus Allocation ---
+    let monthlySurplus = surplusForMonth;
     const bufferTarget = 3 * monthlyBaseExpenses + 1 * avgInitialInstallment;
     const emergencyTarget = 12 * monthlyBaseExpenses + 12 * avgInitialInstallment;
-
-    let monthlySurplus = totalIncome - totalExpenses;
     
     if (monthlySurplus > 0) {
-      if (currentBufferBalance < bufferTarget) {
-        const needed = bufferTarget - currentBufferBalance;
-        const toFill = Math.min(monthlySurplus, needed);
-        currentBufferBalance += toFill;
-        monthlySurplus -= toFill;
-      }
+      const toBuffer = Math.min(monthlySurplus, bufferTarget - currentBufferBalance);
+      currentBufferBalance += Math.max(0, toBuffer);
+      monthlySurplus -= Math.max(0, toBuffer);
       
-      if (monthlySurplus > 0 && currentEmergencyBalance < emergencyTarget) {
-        const needed = emergencyTarget - currentEmergencyBalance;
-        const toFill = Math.min(monthlySurplus, needed);
-        currentEmergencyBalance += toFill;
-        monthlySurplus -= toFill;
-      }
+      const toEmergency = Math.min(monthlySurplus, emergencyTarget - currentEmergencyBalance);
+      currentEmergencyBalance += Math.max(0, toEmergency);
+      monthlySurplus -= Math.max(0, toEmergency);
 
-      if (monthlySurplus > 0) {
-        currentExtraBucket += monthlySurplus;
-        monthlySurplus = 0;
-      }
-    } else if (monthlySurplus < 0) {
+      currentExtraBucket += Math.max(0, monthlySurplus);
+    } else {
       let deficit = Math.abs(monthlySurplus);
       const fromBuffer = Math.min(deficit, currentBufferBalance);
       currentBufferBalance -= fromBuffer;
@@ -217,11 +209,7 @@ export const runSimulation = (inputs: FinancialInputs): SimulationResult => {
       date: dateStr,
       isEmployed,
       income: {
-        salary: salaryIncome,
-        thr: thrIncome,
-        compensation: compIncome,
-        bpjsClaim,
-        total: totalIncome,
+        salary: salaryIncome, thr: thrIncome, compensation: compIncome, bpjsClaim: bpjsClaim, total: totalIncome,
       },
       expenses: {
         totalBase: monthlyBaseExpenses,
@@ -230,34 +218,28 @@ export const runSimulation = (inputs: FinancialInputs): SimulationResult => {
         grandTotal: totalExpenses,
       },
       mortgage: {
-        interestRate: currentRate,
-        interestPaid,
-        principalPaid,
-        remainingPrincipal: mortgagePrincipal,
-        extraPaymentApplied,
-        interestSaved: 0,
-        termReduction: 0,
-        installmentBeforeRecalc,
-        installmentAfterRecalc,
+        interestRate: currentRate, interestPaid, principalPaid,
+        remainingPrincipal: mortgagePrincipal, extraPaymentApplied,
+        interestSaved: 0, termReduction: 0,
+        installmentBeforeRecalc, installmentAfterRecalc,
       },
       funds: {
-        buffer: currentBufferBalance,
-        emergency: currentEmergencyBalance,
-        extraBucket: currentExtraBucket,
-        bpjs: currentBpjsBalance,
-        bufferTarget,
-        emergencyTarget,
+        buffer: currentBufferBalance, emergency: currentEmergencyBalance,
+        extraBucket: currentExtraBucket, bpjs: currentBpjsBalance,
+        bufferTarget, emergencyTarget,
       },
-      surplus: totalIncome - totalExpenses,
-      riskFlags: [],
+      metrics: {
+        incomeToExpenseRatio,
+        debtServiceRatio,
+      },
+      surplus: surplusForMonth,
+      riskFlags: riskFlags,
     });
   }
 
-  const risk = analyzeRisk(ledger);
-
   return {
     ledger,
-    risk,
+    risk: analyzeRisk(ledger),
     extraPaymentLogs,
     totalInterestSaved,
     fullPayoffMonth,
