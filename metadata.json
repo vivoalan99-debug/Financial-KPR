@@ -1,0 +1,5 @@
+{
+  "name": "Financial Survival & Mortgage Simulator",
+  "description": "A fully deterministic, auditable financial engine for simulating survival runways, mortgage repayments, and emergency fund depletion over a 20-year horizon.",
+  "requestFramePermissions": []
+}
